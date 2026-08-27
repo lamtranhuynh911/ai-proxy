@@ -15,8 +15,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
 
 # ---------------------------------------------------------------------------
-DATABRICKS_HOST = "https://adb-3423969507737722.2.azuredatabricks.net"
-DATABRICKS_PROFILE = "adb-3423969507737722"
+DATABRICKS_HOST = "https://adb-4482605715640778.18.azuredatabricks.net"
+DATABRICKS_PROFILE = "adb-4482605715640778"
 DATABRICKS_GATEWAY_PATH = "/ai-gateway/anthropic/v1/messages"
 
 MODEL_MAP: Dict[str, str] = {
@@ -225,4 +225,4 @@ if __name__ == "__main__":
         raise
     uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT)
 
-#databricks auth login --host https://adb-3423969507737722.2.azuredatabricks.net
+#databricks auth login --host https://adb-4482605715640778.18.azuredatabricks.net
