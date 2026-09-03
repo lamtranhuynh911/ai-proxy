@@ -1,7 +1,6 @@
-"""
-Anthropic-compatible proxy for Databricks AI Gateway.
-"""
+"""Anthropic proxy for using Claude Code with Databricks AI Gateway."""
 
+import argparse
 import json
 import logging
 import os
@@ -44,7 +43,7 @@ MODEL_MAP: Dict[str, str] = {
 DEFAULT_MODEL = "system.ai.claude-haiku-4-5"
 
 LISTEN_HOST = "0.0.0.0"  # bind to all interfaces so WSL/other hosts can reach it
-LISTEN_PORT = 8787
+LISTEN_PORT = 8786
 TOKEN_TTL_SECONDS = 55 * 60
 TOKEN_REFRESH_SKEW_SECONDS = 60
 
@@ -54,8 +53,8 @@ STRIP_TOP_LEVEL = {
     "metadata",
     "service_tier",
     "top_k",           # sometimes rejected
-    "thinking",        # extended thinking may not be supported via gateway
-    "mcp_servers",
+    "mcp_servers",     # Claude Code's local MCP configuration is not upstream data
+    "context_management",  # unsupported by the Databricks Anthropic gateway
 }
 
 # ---------------------------------------------------------------------------
@@ -63,7 +62,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
-log = logging.getLogger("db-anthropic-proxy")
+log = logging.getLogger("claude-code-proxy")
 
 _token: Optional[str] = None
 _token_fetched_at: float = 0.0
@@ -134,7 +133,7 @@ def get_token(force_refresh: bool = False) -> str:
     return _token
 
 
-app = FastAPI(title="Databricks -> Anthropic proxy")
+app = FastAPI(title="Databricks -> Claude Code proxy")
 _http = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=15.0))
 
 
@@ -195,6 +194,23 @@ async def health():
 @app.get("/v1/models")
 async def list_models():
     return {"data": [{"id": n, "type": "model"} for n in MODEL_MAP], "has_more": False}
+
+
+@app.post("/v1/messages/count_tokens")
+async def count_tokens(request: Request):
+    """Provide the endpoint used by recent Claude clients before a request."""
+    try:
+        body = await request.json()
+    except Exception as e:
+        return JSONResponse({"error": {"type": "invalid_request_error",
+                                        "message": f"Invalid JSON: {e}"}},
+                            status_code=400)
+
+    # Databricks does not expose Anthropic's count-tokens API. Returning a
+    # conservative estimate keeps Claude Code's preflight request compatible;
+    # the actual completion request still goes through the gateway unchanged.
+    text = json.dumps(body, ensure_ascii=False)
+    return {"input_tokens": max(1, len(text) // 4)}
 
 
 @app.post("/v1/messages")
@@ -288,12 +304,28 @@ async def _shutdown():
     await _http.aclose()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Expose Databricks AI Gateway as an Anthropic endpoint for Claude Code."
+    )
+    parser.add_argument(
+        "-e", "--environment", choices=sorted(ENVIRONMENT_PREFIXES),
+        help="Databricks environment: d (dev), q (QA), or p (prod).",
+    )
+    parser.add_argument("--host", default=LISTEN_HOST, help="Local bind address.")
+    parser.add_argument("--port", type=int, default=LISTEN_PORT, help="Local port.")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
     try:
-        environment = input("Select Databricks environment (d=dev, q=qa, p=prod): ")
+        args = parse_args()
+        environment = args.environment or input(
+            "Select Databricks environment (d=dev, q=qa, p=prod): "
+        )
         select_environment(environment)
         get_token()
     except Exception as e:
         log.error("Startup failed: %s", e)
         raise
-    uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT)
+    uvicorn.run(app, host=args.host, port=args.port)
