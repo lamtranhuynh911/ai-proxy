@@ -191,6 +191,11 @@ async def health():
     return {"ok": True, "profile": DATABRICKS_PROFILE, "host": DATABRICKS_HOST}
 
 
+@app.api_route("/api/hello", methods=["GET", "HEAD"])
+async def api_hello():
+    return {"ok": True}
+
+
 @app.get("/v1/models")
 async def list_models():
     return {"data": [{"id": n, "type": "model"} for n in MODEL_MAP], "has_more": False}
