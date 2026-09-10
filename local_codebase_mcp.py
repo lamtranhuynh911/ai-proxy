@@ -67,7 +67,7 @@ def get_embedding(text: str) -> list[float]:
 def _index_file(filepath: str) -> str:
     """Đọc, cắt nhỏ bằng LangChain và lập chỉ mục (index) file Python vào Qdrant."""
     if not os.path.exists(filepath):
-        return f"❌ Lỗi: Không tìm thấy file tại đường dẫn: {filepath}"
+        return f"Error: File not found at path: {filepath}"
 
     try:
         # Đọc nội dung file
@@ -112,9 +112,9 @@ def _index_file(filepath: str) -> str:
         # Upsert vào Database
         qdrant.upsert(collection_name=COLLECTION_NAME, points=points)
 
-        return f"✅ Lập chỉ mục thành công file: {filepath}\nChi tiết: Đã cắt thành {len(chunks)} đoạn (chunks) giữ nguyên logic Python."
+        return f"Successfully indexed file: {filepath}\nDetails: Split into {len(chunks)} chunks while preserving Python structure."
     except Exception as e:
-        return f"❌ Lỗi khi index file {filepath}: {str(e)}"
+        return f"Error indexing file {filepath}: {str(e)}"
 
 
 @mcp.tool()
@@ -128,25 +128,28 @@ def index_python_file(filepath: str) -> str:
 @mcp.tool()
 def semantic_search(query: str, limit: int = 5) -> str:
     """
-    Công cụ tìm kiếm ngữ nghĩa trong codebase.
-    Nhập câu hỏi (query) ví dụ: 'Hàm xử lý xác thực đăng nhập' hoặc 'Logic tính thuế'.
+    Search the workspace codebase by meaning.
+    Use this tool before answering questions about code locations, implementation details,
+    or behavior when the relevant files are not already known. Pass the user's request as
+    the query, for example: 'login authentication' or 'tax calculation logic'.
     """
     try:
         # Nhúng câu hỏi thành vector
         query_vector = get_embedding(query)
 
         # Dò tìm các vector khớp nhất trong Qdrant
-        hits = qdrant.search(
+        result = qdrant.query_points(
             collection_name=COLLECTION_NAME,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit
         )
+        hits = result.points
 
         if not hits:
-            return "Không tìm thấy đoạn code nào liên quan trong cơ sở dữ liệu."
+            return "No relevant code was found in the database."
 
         # Chuẩn bị văn bản trả về cho Claude Code đọc
-        result_text = f"🔍 Tìm thấy {len(hits)} đoạn code liên quan đến '{query}':\n\n"
+        result_text = f"Found {len(hits)} relevant code chunks for '{query}':\n\n"
         for hit in hits:
             filepath = hit.payload.get("filepath", "Unknown")
             chunk_index = hit.payload.get("chunk_index", "?")
@@ -154,12 +157,12 @@ def semantic_search(query: str, limit: int = 5) -> str:
             content = hit.payload.get("content", "")
             score = round(hit.score, 3)
 
-            result_text += f"--- 📄 File: {filepath} (Đoạn {chunk_index}/{total_chunks}) | 🎯 Độ khớp: {score} ---\n"
+            result_text += f"--- File: {filepath} (Chunk {chunk_index}/{total_chunks}) | Relevance: {score} ---\n"
             result_text += f"```python\n{content}\n```\n\n"
 
         return result_text
     except Exception as e:
-        return f"❌ Lỗi khi thực hiện tìm kiếm: {str(e)}"
+        return f"Error while performing search: {str(e)}"
 
 # ==========================================
 # TỰ ĐỘNG INDEX KHI FILE ĐƯỢC LƯU (WATCHDOG)
@@ -219,24 +222,24 @@ def bulk_index_workspace():
             if name.endswith(".py"):
                 filepath = os.path.join(root, name)
                 result = _index_file(filepath)
-                if result.startswith("✅"):
+                if result.startswith("Successfully"):
                     indexed += 1
                 else:
                     print(f"[startup-index] {result}", file=sys.stderr, flush=True)
-    print(f"[startup-index] ✅ Đã index {indexed} file .py trong workspace: {WORKSPACE_DIR}", file=sys.stderr, flush=True)
+    print(f"[startup-index] Successfully indexed {indexed} .py files in workspace: {WORKSPACE_DIR}", file=sys.stderr, flush=True)
 
 
 def start_watcher():
     """Khởi động Observer theo dõi WORKSPACE_DIR (workspace hiện tại) trong một thread nền."""
     if not os.path.isdir(WORKSPACE_DIR):
-        print(f"[watchdog] ⚠️ Bỏ qua theo dõi: không tìm thấy thư mục {WORKSPACE_DIR}", file=sys.stderr)
+        print(f"[watchdog] Skipping watch: directory not found: {WORKSPACE_DIR}", file=sys.stderr)
         return
 
     handler = PythonSaveHandler()
     observer = Observer()
     observer.schedule(handler, WORKSPACE_DIR, recursive=True)
     observer.start()
-    print(f"[watchdog] 👀 Workspace: {WORKSPACE_DIR} (collection: {COLLECTION_NAME})", file=sys.stderr)
+    print(f"[watchdog] Workspace: {WORKSPACE_DIR} (collection: {COLLECTION_NAME})", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -190,6 +190,9 @@ def sanitize_body(body: Dict[str, Any]) -> Dict[str, Any]:
 async def health():
     return {"ok": True}
 
+@app.api_route("/api/hello", methods=["GET", "HEAD"])
+async def api_hello():
+    return {"ok": True}
 
 @app.get("/v1/models")
 async def list_models():
