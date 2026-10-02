@@ -27,20 +27,9 @@ ENVIRONMENT_PREFIXES = {
     "p": "P_",
 }
 
-MODEL_MAP: Dict[str, str] = {
-    "claude-opus-5":              "system.ai.claude-opus-5",
-    "claude-opus-4-7":            "system.ai.claude-opus-4-7",
-    "claude-opus-4-8":            "system.ai.claude-opus-4-8",
-    "claude-opus-4-6":            "system.ai.claude-opus-4-6",
-    "claude-opus-4-5":            "system.ai.claude-opus-4-5",
-    "claude-opus-4-1":            "system.ai.claude-opus-4-1",
-    "claude-sonnet-5":            "system.ai.claude-sonnet-5",
-    "claude-sonnet-4-6":          "system.ai.claude-sonnet-4-6",
-    "claude-sonnet-4-5":          "system.ai.claude-sonnet-4-5",
-    "claude-sonnet-4":            "system.ai.claude-sonnet-4",
-    "claude-haiku-4-5":           "system.ai.claude-haiku-4-5",
-}
-DEFAULT_MODEL = "system.ai.claude-haiku-4-5"
+# Model prefix for Databricks AI Gateway
+DATABRICKS_MODEL_PREFIX = "system.ai."
+DEFAULT_MODEL = f"{DATABRICKS_MODEL_PREFIX}claude-haiku-4-5"
 
 LISTEN_HOST = "0.0.0.0"  # bind to all interfaces so WSL/other hosts can reach it
 LISTEN_PORT = 8786
@@ -53,6 +42,7 @@ STRIP_TOP_LEVEL = {
     "metadata",
     "service_tier",
     "top_k",           # sometimes rejected
+    "thinking",        # adaptive thinking is not supported by the gateway
     "mcp_servers",     # Claude Code's local MCP configuration is not upstream data
     "context_management",  # unsupported by the Databricks Anthropic gateway
 }
@@ -157,14 +147,14 @@ def sanitize_body(body: Dict[str, Any]) -> Dict[str, Any]:
     else:
         # Strip date suffix (e.g., -20241022) from model names
         model_base = _strip_model_date_suffix(incoming)
-        
-        if model_base in MODEL_MAP:
-            body["model"] = MODEL_MAP[model_base]
-        elif not model_base.startswith("system.ai."):
-            log.warning("Unknown model %r -> %s", incoming, DEFAULT_MODEL)
-            body["model"] = DEFAULT_MODEL
-        else:
+
+        # If already in Databricks format, use as-is
+        if model_base.startswith(DATABRICKS_MODEL_PREFIX):
             body["model"] = model_base
+        else:
+            # Dynamically construct Databricks model name by prepending prefix
+            body["model"] = f"{DATABRICKS_MODEL_PREFIX}{model_base}"
+            log.info("Mapping Claude model %r -> %s", incoming, body["model"])
 
     # Strip unsupported top-level fields
     for k in list(body.keys()):
@@ -196,7 +186,20 @@ async def api_hello():
 
 @app.get("/v1/models")
 async def list_models():
-    return {"data": [{"id": n, "type": "model"} for n in MODEL_MAP], "has_more": False}
+    # Return a list of supported Claude models that will be dynamically mapped
+    # These are representative models that Claude Code may request
+    supported_models = [
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-5-5",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+    ]
+    return {"data": [{"id": n, "type": "model"} for n in supported_models], "has_more": False}
 
 
 @app.post("/v1/messages/count_tokens")
