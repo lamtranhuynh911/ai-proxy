@@ -39,11 +39,11 @@ TOKEN_REFRESH_SKEW_SECONDS = 60
 # Fields at the top-level of an Anthropic request that Databricks' gateway
 # is known to reject. Strip them defensively.
 STRIP_TOP_LEVEL = {
-    "metadata",
-    "service_tier",
-    "top_k",           # sometimes rejected
-    "thinking",        # adaptive thinking is not supported by the gateway
-    "mcp_servers",     # Claude Code's local MCP configuration is not upstream data
+    # "metadata",
+    # "service_tier",
+    # "top_k",           # sometimes rejected
+    # "thinking",        # adaptive thinking is not supported by the gateway
+    # "mcp_servers",     # Claude Code's local MCP configuration is not upstream data
     "context_management",  # unsupported by the Databricks Anthropic gateway
 }
 
