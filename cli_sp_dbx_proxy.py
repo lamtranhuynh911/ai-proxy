@@ -4,7 +4,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import time
 from typing import Any, Dict, Optional
 
@@ -27,34 +26,23 @@ ENVIRONMENT_PREFIXES = {
     "p": "P_",
 }
 
-MODEL_MAP: Dict[str, str] = {
-    "claude-opus-5":              "system.ai.claude-opus-5",
-    "claude-opus-4-7":            "system.ai.claude-opus-4-7",
-    "claude-opus-4-8":            "system.ai.claude-opus-4-8",
-    "claude-opus-4-6":            "system.ai.claude-opus-4-6",
-    "claude-opus-4-5":            "system.ai.claude-opus-4-5",
-    "claude-opus-4-1":            "system.ai.claude-opus-4-1",
-    "claude-sonnet-5":            "system.ai.claude-sonnet-5",
-    "claude-sonnet-4-6":          "system.ai.claude-sonnet-4-6",
-    "claude-sonnet-4-5":          "system.ai.claude-sonnet-4-5",
-    "claude-sonnet-4":            "system.ai.claude-sonnet-4",
-    "claude-haiku-4-5":           "system.ai.claude-haiku-4-5",
-}
 DEFAULT_MODEL = "system.ai.claude-haiku-4-5"
+DATABRICKS_MODEL_PREFIX = "system.ai."
 
 LISTEN_HOST = "0.0.0.0"  # bind to all interfaces so WSL/other hosts can reach it
 LISTEN_PORT = 8786
 TOKEN_TTL_SECONDS = 55 * 60
 TOKEN_REFRESH_SKEW_SECONDS = 60
 
-# Fields at the top-level of an Anthropic request that Databricks' gateway
-# is known to reject. Strip them defensively.
+# Fields that are local-only or unsupported by the Databricks gateway.
+# "safeguards" is auto mode's server-side classifier review request. It pairs
+# with an anthropic-beta value this proxy does not forward, and Databricks
+# cannot perform the review. Stripping it lets the request complete with no
+# review results, so Claude Code falls back to its own classifier requests.
 STRIP_TOP_LEVEL = {
-    "metadata",
-    "service_tier",
-    "top_k",           # sometimes rejected
-    "mcp_servers",     # Claude Code's local MCP configuration is not upstream data
-    "context_management",  # unsupported by the Databricks Anthropic gateway
+    "mcp_servers",
+    "context_management",
+    "safeguards",
 }
 
 # ---------------------------------------------------------------------------
@@ -93,11 +81,6 @@ def select_environment(environment: str) -> None:
     DATABRICKS_CLIENT_ID = settings["client_id"]
     DATABRICKS_CLIENT_SECRET = settings["client_secret"]
     log.info("Using Databricks environment %s.", environment)
-
-
-def _strip_model_date_suffix(model: str) -> str:
-    """Remove date suffix (e.g., -20241022) from model names."""
-    return re.sub(r"-\d{8}$", "", model)
 
 
 def _fetch_token() -> str:
@@ -150,21 +133,11 @@ def _strip_cache_control(obj: Any) -> Any:
 
 
 def sanitize_body(body: Dict[str, Any]) -> Dict[str, Any]:
-    # Model rewrite
     incoming = body.get("model")
     if not incoming:
         body["model"] = DEFAULT_MODEL
-    else:
-        # Strip date suffix (e.g., -20241022) from model names
-        model_base = _strip_model_date_suffix(incoming)
-        
-        if model_base in MODEL_MAP:
-            body["model"] = MODEL_MAP[model_base]
-        elif not model_base.startswith("system.ai."):
-            log.warning("Unknown model %r -> %s", incoming, DEFAULT_MODEL)
-            body["model"] = DEFAULT_MODEL
-        else:
-            body["model"] = model_base
+    elif isinstance(incoming, str) and not incoming.startswith(DATABRICKS_MODEL_PREFIX):
+        body["model"] = f"{DATABRICKS_MODEL_PREFIX}{incoming}"
 
     # Strip unsupported top-level fields
     for k in list(body.keys()):
@@ -172,8 +145,13 @@ def sanitize_body(body: Dict[str, Any]) -> Dict[str, Any]:
             log.info("Stripping unsupported field: %s", k)
             body.pop(k, None)
 
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "adaptive":
+        log.info("Stripping unsupported thinking.type=adaptive setting")
+        body.pop("thinking")
+
     # Strip prompt-caching markers everywhere
-    _strip_cache_control(body)
+    # _strip_cache_control(body)
 
     # Ensure max_tokens exists (Anthropic requires it)
     body.setdefault("max_tokens", 4096)
@@ -196,7 +174,7 @@ async def api_hello():
 
 @app.get("/v1/models")
 async def list_models():
-    return {"data": [{"id": n, "type": "model"} for n in MODEL_MAP], "has_more": False}
+    return {"data": [{"id": DEFAULT_MODEL, "type": "model"}], "has_more": False}
 
 
 @app.post("/v1/messages/count_tokens")
@@ -251,33 +229,47 @@ async def messages(request: Request):
     if stream:
         body["stream"] = True
 
+        # Open the upstream stream before responding so an upstream error keeps
+        # its real status code and body. Claude Code's recovery paths (for
+        # example falling back when the auto mode classifier model is not
+        # available) match on both, which a 200 response carrying an SSE error
+        # event would hide.
+        try:
+            r = await _http.send(
+                _http.build_request("POST", url, headers=headers, json=body),
+                stream=True,
+            )
+            if r.status_code == 401:
+                await r.aclose()
+                headers["Authorization"] = f"Bearer {get_token(force_refresh=True)}"
+                r = await _http.send(
+                    _http.build_request("POST", url, headers=headers, json=body),
+                    stream=True,
+                )
+            if r.status_code >= 400:
+                err = await r.aread()
+                await r.aclose()
+                log.error("Upstream %d: %s", r.status_code, err.decode("utf-8", "replace"))
+                return Response(
+                    content=err,
+                    status_code=r.status_code,
+                    media_type=r.headers.get("content-type", "application/json"),
+                )
+        except httpx.HTTPError as e:
+            log.exception("Upstream error")
+            return JSONResponse({"error": {"type": "api_error", "message": str(e)}},
+                                status_code=502)
+
         async def event_stream():
             try:
-                async with _http.stream("POST", url, headers=headers, json=body) as r:
-                    if r.status_code == 401:
-                        await r.aread()
-                        headers["Authorization"] = f"Bearer {get_token(force_refresh=True)}"
-                        async with _http.stream("POST", url, headers=headers, json=body) as retry:
-                            if retry.status_code >= 400:
-                                r = retry
-                            else:
-                                async for chunk in retry.aiter_raw():
-                                    if chunk:
-                                        yield chunk
-                                return
-                    if r.status_code >= 400:
-                        err = await r.aread()
-                        log.error("Upstream %d: %s", r.status_code, err.decode("utf-8", "replace"))
-                        # Emit an SSE error event so the client sees something useful
-                        msg = err.decode("utf-8", "replace")
-                        yield (f"event: error\ndata: {json.dumps({'type':'error','error':{'type':'api_error','message':msg}})}\n\n").encode()
-                        return
-                    async for chunk in r.aiter_raw():
-                        if chunk:
-                            yield chunk
+                async for chunk in r.aiter_raw():
+                    if chunk:
+                        yield chunk
             except httpx.HTTPError as e:
                 log.exception("Upstream stream error")
                 yield (f"event: error\ndata: {json.dumps({'type':'error','error':{'type':'api_error','message':str(e)}})}\n\n").encode()
+            finally:
+                await r.aclose()
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
